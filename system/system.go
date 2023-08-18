@@ -147,10 +147,7 @@ func getDriverStatus() bool {
 		return false
 	}
 	value := strings.SplitN(string(out), " ", 2)[0]
-	if value != "vhci-hcd" {
-		return false
-	}
-	return true
+	return value == "vhci-hcd"
 }
 
 func LoadKernelDriver(c *prop.Change) *dbus.Error {
