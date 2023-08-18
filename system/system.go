@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io/ioutil"
 	"os"
+	"os/exec"
 	"strings"
 
 	"github.com/godbus/dbus/v5"
@@ -16,17 +17,24 @@ import (
 )
 
 const (
-	objectPath             = "/io/hass/os/System"
-	ifaceName              = "io.hass.os.System"
-	labelDataFileSystem    = "hassos-data"
-	labelOverlayFileSystem = "hassos-overlay"
-	kernelCommandLine      = "/mnt/boot/cmdline.txt"
-	tmpKernelCommandLine   = "/mnt/boot/.tmp.cmdline.txt"
-	sshAuthKeyFileName     = "/root/.ssh/authorized_keys"
+	objectPath               = "/io/hass/os/System"
+	ifaceName                = "io.hass.os.System"
+	labelDataFileSystem      = "hassos-data"
+	labelOverlayFileSystem   = "hassos-overlay"
+	kernelCommandLine        = "/mnt/boot/cmdline.txt"
+	tmpKernelCommandLine     = "/mnt/boot/.tmp.cmdline.txt"
+	sshAuthKeyFileName       = "/root/.ssh/authorized_keys"
+	modulesAutoloadDirectory = "/etc/modules-load.d/"
+	moduleLoadCommand        = "/sbin/modprobe"
+)
+
+var (
+	loadUSBIP bool
 )
 
 type system struct {
-	conn *dbus.Conn
+	conn  *dbus.Conn
+	props *prop.Properties
 }
 
 func getAndCheckBusObjectFromLabel(udisks2helper udisks2.UDisks2Helper, label string) (dbus.BusObject, error) {
@@ -132,12 +140,63 @@ func (d system) ClearSSHAuthKeys() *dbus.Error {
 	return nil
 }
 
+func getDriverStatus() bool {
+	cmd := "cat /proc/modules | grep vhci-hcd"
+	out, err := exec.Command(cmd).Output()
+	if err != nil {
+		return false
+	}
+	value := strings.SplitN(string(out), " ", 2)[0]
+	if value != "vhci-hcd" {
+		return false
+	}
+	return true
+}
+
+func LoadKernelDriver(c *prop.Change) *dbus.Error {
+	logging.Info.Printf("Loading usbip driver: %t", c.Value)
+	loadUSBIP = c.Value.(bool)
+
+	var err error
+	cmd := exec.Command(moduleLoadCommand)
+	if c.Value.(bool) {
+		cmd.Args = append(cmd.Args, "vhci-hcd")
+	} else {
+		cmd.Args = append(cmd.Args, "--remove", "vhci-hcd")
+	}
+	_, cerror := cmd.StdinPipe()
+
+	if cerror != nil {
+		return dbus.MakeFailedError(err)
+	}
+	return nil
+}
+
 func InitializeDBus(conn *dbus.Conn) {
 	d := system{
 		conn: conn,
 	}
 
-	err := conn.Export(d, objectPath, ifaceName)
+	loadUSBIP = getDriverStatus()
+
+	propsSpec := map[string]map[string]*prop.Prop{
+		ifaceName: {
+			"LoadUSBIP": {
+				Value:    loadUSBIP,
+				Writable: true,
+				Emit:     prop.EmitTrue,
+				Callback: LoadKernelDriver,
+			},
+		},
+	}
+
+	props, err := prop.Export(conn, objectPath, propsSpec)
+	if err != nil {
+		logging.Critical.Panic(err)
+	}
+	d.props = props
+
+	err = conn.Export(d, objectPath, ifaceName)
 	if err != nil {
 		logging.Critical.Panic(err)
 	}
